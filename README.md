@@ -121,6 +121,70 @@ python detect_redhead.py
 
 ---
 
+## 功能四：离线 HTTP 接口（`server.py`）
+
+把切分能力以本地 HTTP 接口暴露给其它应用，**全程离线**（OCR 用本地 Tesseract，无外网调用）。监听 `127.0.0.1`，不对外开放。
+
+启动：
+
+```bash
+pip install fastapi uvicorn python-multipart
+python server.py            # http://127.0.0.1:8000
+# 或: uvicorn server:app --host 127.0.0.1 --port 8000
+```
+
+端点：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | 健康检查，返回 `{"status":"ok","offline":true,"tesseract":路径}` |
+| POST | `/split` | body `{pdf_path, out_dir?}`，按本地路径切分 |
+| POST | `/split/upload` | multipart 上传 PDF 切分（字段 `file`，可选 `out_dir`） |
+| GET | `/download?path=绝对路径` | 取回产物（仅限本次输出根内，防目录穿越） |
+
+### curl 示例
+
+```bash
+# 健康检查
+curl http://127.0.0.1:8000/health
+
+# 按本地路径切分
+curl -X POST http://127.0.0.1:8000/split \
+  -H "Content-Type: application/json" \
+  -d "{\"pdf_path\":\"D:/Backup/RayChan/册1.pdf\"}"
+
+# 上传文件切分
+curl -X POST http://127.0.0.1:8000/split/upload -F "file=@册1.pdf"
+
+# 下载某个切分产物（path 取上一步 manifest 里的 out 字段）
+curl "http://127.0.0.1:8000/download?path=D:/Backup/RayChan/split_redhead/册1/标题.pdf" -o 标题.pdf
+```
+
+### Python 示例（requests）
+
+```python
+import requests
+
+# 按路径切分
+r = requests.post("http://127.0.0.1:8000/split",
+                  json={"pdf_path": r"D:/Backup/RayChan/册1.pdf"})
+print(r.json())          # {'pdf':..., 'out_dir':..., 'count':N, 'manifest':[...]}
+for item in r.json()["manifest"]:
+    print(item["title"], item["pages"], item["out"])
+
+# 上传切分
+with open("册1.pdf", "rb") as f:
+    r = requests.post("http://127.0.0.1:8000/split/upload", files={"file": f})
+print(r.json()["count"])
+```
+
+返回结构：`{pdf, out_dir, count, manifest}`，`manifest` 为列表，每项 `{index, title, pages, out}`，`out` 为产物绝对路径。
+
+> 大册 OCR 耗时较长（几十~数百页可能数分钟），调用方请设置足够超时（如 `requests.post(..., timeout=300)`）。
+> 如需局域网访问，请自行用反向代理并加鉴权，勿直接暴露本服务。
+
+---
+
 ## 可调参数（`segment_redhead.py` 顶部）
 
 | 参数 | 作用 |
