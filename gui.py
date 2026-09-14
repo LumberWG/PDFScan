@@ -4,14 +4,24 @@
 说明: 切分在后台线程执行，OCR 用多进程池；停止按钮在当前文件内终止 OCR（缓存已
 完成的页，下次自动续跑）。依赖 tkinter（Python 官方 Windows 安装包自带）。
 """
-import os, re, glob, sys, queue, threading, contextlib
+import os, re, glob, sys, queue, shutil, threading, contextlib
 import multiprocessing as mp
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-import fitz
+import pymupdf as fitz
 
 from segment_redhead import segment, SegmentCancelled
+
+# Windows 高 DPI：必须在创建 Tk 窗口前声明 DPI 感知，否则字体/控件发糊
+try:
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
 
 DEFAULT_OUT = r"D:\Backup\RayChan\split_redhead"
 PDF_RE = re.compile(r"\.pdf$", re.I)
@@ -25,6 +35,28 @@ def pdf_pages(path):
         return n
     except Exception:
         return -1
+
+
+def book_status(pdf_path, out_dir):
+    """检查一册的处理状态（不跑切分）。
+    返回 (状态, 备注)：未处理 / 已切(正常) / 已切·含横版N个（旧逻辑转正过的页，建议强制重切）。"""
+    base = PDF_RE.sub("", os.path.basename(pdf_path))
+    root = os.path.join(out_dir, base)
+    if not os.path.exists(os.path.join(root, "manifest.csv")):
+        return "未处理", ""
+    bad = 0
+    try:
+        for f in os.listdir(root):
+            if f.lower().endswith(".pdf"):
+                d = fitz.open(os.path.join(root, f))
+                if any(d[i].rect.width > d[i].rect.height for i in range(d.page_count)):
+                    bad += 1
+                d.close()
+    except Exception as e:
+        return "已切(检查出错)", str(e)[:40]
+    if bad:
+        return f"已切·含横版{bad}个", "建议强制重切"
+    return "已切(正常)", ""
 
 
 class QueueWriter:
@@ -45,15 +77,26 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PDFScan — 红头文档切分工具")
-        self.geometry("900x660")
+        self.geometry("960x700")
+        self.minsize(880, 620)
         self.q = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = None
+        self.checker = None
         self._build()
         self.after(100, self._poll)
 
     # ---------- 界面 ----------
     def _build(self):
+        # 统一 UI 字体：微软雅黑 UI（中英文粗细一致，避免 CJK 字体链接导致的忽粗忽细），
+        # Treeview 行高按字体实际行高设置（DPI 感知后默认行高不足会文字重叠）。
+        import tkinter.font as tkfont
+        ui_font = ("Microsoft YaHei UI", 10)
+        style = ttk.Style(self)
+        style.configure(".", font=ui_font)
+        linespace = tkfont.Font(family="Microsoft YaHei UI", size=10).metrics("linespace")
+        style.configure("Treeview", rowheight=linespace + 10)
+
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
         ttk.Button(top, text="添加 PDF 文件…", command=self.add_files).pack(side="left")
@@ -69,6 +112,9 @@ class App(tk.Tk):
         ttk.Button(mid, text="浏览…", command=self.choose_out).pack(side="left")
         self.force_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mid, text="强制重切已存在", variable=self.force_var).pack(side="left", padx=(10, 0))
+        self.autofix_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(mid, text="自动重切横版旧产物", variable=self.autofix_var,
+                        onvalue=True, offvalue=False).pack(side="left", padx=(10, 0))
 
         act = ttk.Frame(self, padding=8)
         act.pack(fill="x")
@@ -76,6 +122,8 @@ class App(tk.Tk):
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(act, text="停止", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=(6, 0))
+        self.check_btn = ttk.Button(act, text="检查状态", command=self.check)
+        self.check_btn.pack(side="left", padx=(6, 0))
         ttk.Button(act, text="打开输出目录", command=self.open_out).pack(side="left", padx=(6, 0))
 
         cols = ("name", "pages", "status", "docs")
@@ -88,8 +136,8 @@ class App(tk.Tk):
         self.tree.heading("docs", text="切出文档")
         self.tree.column("name", width=430)
         self.tree.column("pages", width=60, anchor="center")
-        self.tree.column("status", width=110, anchor="center")
-        self.tree.column("docs", width=80, anchor="center")
+        self.tree.column("status", width=150, anchor="center")
+        self.tree.column("docs", width=90, anchor="center")
         vsb = ttk.Scrollbar(lst, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -103,20 +151,20 @@ class App(tk.Tk):
         row.pack(fill="x", pady=(2, 6))
         self.page_bar = ttk.Progressbar(row, maximum=100)
         self.page_bar.pack(side="left", fill="x", expand=True)
-        self.page_pct = ttk.Label(row, text="0%", width=6)
-        self.page_pct.pack(side="left", padx=(4, 0))
+        self.page_pct = ttk.Label(row, text="0%", width=16, anchor="e")
+        self.page_pct.pack(side="left", padx=(6, 0))
         ttk.Label(prog, text="总体进度:").pack(anchor="w")
         row2 = ttk.Frame(prog)
         row2.pack(fill="x", pady=(2, 0))
         self.all_bar = ttk.Progressbar(row2, maximum=100)
         self.all_bar.pack(side="left", fill="x", expand=True)
-        self.all_pct = ttk.Label(row2, text="0%", width=6)
-        self.all_pct.pack(side="left", padx=(4, 0))
+        self.all_pct = ttk.Label(row2, text="0%", width=16, anchor="e")
+        self.all_pct.pack(side="left", padx=(6, 0))
 
         logf = ttk.Frame(self, padding=(8, 0, 8, 8))
         logf.pack(fill="both", expand=True)
         ttk.Label(logf, text="日志:").pack(anchor="w")
-        self.log = tk.Text(logf, height=9, wrap="word", state="disabled")
+        self.log = tk.Text(logf, height=9, wrap="word", state="disabled", font=ui_font)
         lsb = ttk.Scrollbar(logf, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=lsb.set)
         self.log.pack(side="left", fill="both", expand=True)
@@ -183,6 +231,40 @@ class App(tk.Tk):
         else:
             messagebox.showinfo("PDFScan", "输出目录不存在，处理后会自动创建")
 
+    # ---------- 状态检查（不跑切分，只标出哪些已切/未切/含横版页） ----------
+    def check(self):
+        if self.worker or self.checker:
+            return
+        items = self.tree.get_children()
+        if not items:
+            messagebox.showinfo("PDFScan", "请先添加 PDF 文件或目录")
+            return
+        out_dir = self.out_var.get().strip()
+        if not out_dir:
+            messagebox.showinfo("PDFScan", "请设置输出目录")
+            return
+        files = [self.tree.item(i, "values")[0] for i in items]
+        self.stop_event.clear()
+        self.check_btn.configure(state="disabled")
+        self.checker = threading.Thread(target=self._check_run, args=(files, out_dir), daemon=True)
+        self.checker.start()
+
+    def _check_run(self, files, out_dir):
+        todo = bad = ok = 0
+        for i, path in enumerate(files):
+            if self.stop_event.is_set():
+                break
+            status, hint = book_status(path, out_dir)
+            self.q.put(("status", i, status, hint))
+            if status == "未处理":
+                todo += 1
+            elif status.startswith("已切·含横版"):
+                bad += 1
+            else:
+                ok += 1
+        self.q.put(("log", f"[检查] 共 {len(files)} 册：未处理 {todo}，正常 {ok}，含横版页建议重切 {bad}（勾选“强制重切已存在”重切后者）"))
+        self.q.put(("check_done",))
+
     # ---------- 处理 ----------
     def start(self):
         if self.worker:
@@ -197,12 +279,13 @@ class App(tk.Tk):
             return
         files = [self.tree.item(i, "values")[0] for i in items]
         force = bool(self.force_var.get())
+        autofix = bool(self.autofix_var.get())
         self.stop_event.clear()
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.all_bar["value"] = 0
         self.all_pct.configure(text="0%")
-        self.worker = threading.Thread(target=self._run, args=(files, out_dir, force), daemon=True)
+        self.worker = threading.Thread(target=self._run, args=(files, out_dir, force, autofix), daemon=True)
         self.worker.start()
 
     def stop(self):
@@ -216,7 +299,7 @@ class App(tk.Tk):
         vals[2], vals[3] = status, docs
         self.tree.item(item, values=vals)
 
-    def _run(self, files, out_dir, force):
+    def _run(self, files, out_dir, force, autofix):
         n = len(files)
         try:
             for i, path in enumerate(files):
@@ -224,19 +307,37 @@ class App(tk.Tk):
                     self.q.put(("log", "[*] 已停止"))
                     break
                 base = PDF_RE.sub("", os.path.basename(path))
-                man = os.path.join(out_dir, base, "manifest.csv")
+                root = os.path.join(out_dir, base)
+                man = os.path.join(root, "manifest.csv")
                 self.q.put(("status", i, "检查中", ""))
-                if os.path.exists(man) and not force:
+                redo = False
+                if os.path.exists(man):
+                    if force:
+                        redo = True
+                    elif autofix:
+                        st, _ = book_status(path, out_dir)
+                        redo = st.startswith("已切·含横版")
+                if os.path.exists(man) and not redo:
                     self.q.put(("status", i, "跳过(已存在)", ""))
                     self.q.put(("log", f"[SKIP] {base}（已存在，勾选“强制重切”可重切）"))
-                    self.q.put(("overall", i + 1, n, 1.0))
+                    self.q.put(("overall", float(i + 1), n))
                     continue
+                if redo and os.path.isdir(root):
+                    # 自动重切：旧产物先挪到 .bak，成功后再删，失败则还原
+                    bak = root + ".bak-自动重切"
+                    if os.path.exists(bak):
+                        import time
+                        bak += time.strftime("-%H%M%S")
+                    os.rename(root, bak)
+                    self.q.put(("log", f"[REDO] {base}（{'强制重切' if force else '旧逻辑横版页，自动重切'}）"))
+                else:
+                    bak = None
                 self.q.put(("status", i, "处理中…", ""))
                 self.q.put(("current", base))
 
                 def cb(done, total):
                     self.q.put(("page", done, total))
-                    self.q.put(("overall", i, n, done / total if total else 1.0))
+                    self.q.put(("overall", i + (done / total if total else 1.0), n))
                     return not self.stop_event.is_set()
 
                 try:
@@ -244,14 +345,23 @@ class App(tk.Tk):
                         manifest = segment(path, out_dir, progress_cb=cb)
                     self.q.put(("status", i, "完成", f"{len(manifest)} 篇"))
                     self.q.put(("log", f"[OK] {base}: 切出 {len(manifest)} 篇"))
+                    if bak:
+                        shutil.rmtree(bak, ignore_errors=True)
                 except SegmentCancelled:
                     self.q.put(("status", i, "已取消", ""))
                     self.q.put(("log", f"[CANCEL] {base}"))
+                    if bak and os.path.isdir(bak):
+                        shutil.rmtree(root, ignore_errors=True)
+                        os.rename(bak, root)
                     break
                 except Exception as e:
                     self.q.put(("status", i, "失败", str(e)[:60]))
                     self.q.put(("log", f"[ERROR] {base}: {e}"))
-                self.q.put(("overall", i + 1, n, 1.0))
+                    if bak and os.path.isdir(bak):
+                        shutil.rmtree(root, ignore_errors=True)
+                        os.rename(bak, root)
+                        self.q.put(("log", f"[RESTORE] {base} 旧产物已还原"))
+                self.q.put(("overall", float(i + 1), n))
         finally:
             self.q.put(("done",))
 
@@ -272,10 +382,10 @@ class App(tk.Tk):
                     self.page_bar["value"] = pct
                     self.page_pct.configure(text=f"{pct:.0f}%  ({msg[1]}/{msg[2]})")
                 elif kind == "overall":
-                    i, n, frac = msg[1], msg[2], msg[3]
-                    pct = (i + frac) / n * 100
+                    c, n = msg[1], msg[2]
+                    pct = min(c / n * 100, 100) if n else 0
                     self.all_bar["value"] = pct
-                    self.all_pct.configure(text=f"{pct:.0f}%  ({i + (1 if frac >= 1 else 0)}/{n})")
+                    self.all_pct.configure(text=f"{pct:.0f}%  ({int(c)}/{n})")
                 elif kind == "done":
                     self.worker = None
                     self.start_btn.configure(state="normal")
@@ -284,6 +394,9 @@ class App(tk.Tk):
                     self.page_bar["value"] = 0
                     self.page_pct.configure(text="0%")
                     self._log("[DONE] 全部处理完毕")
+                elif kind == "check_done":
+                    self.checker = None
+                    self.check_btn.configure(state="normal")
         except queue.Empty:
             pass
         self.after(100, self._poll)
