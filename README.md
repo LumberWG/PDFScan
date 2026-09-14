@@ -21,6 +21,7 @@
 PDFScan/
 ├── segment_redhead.py   # 核心：单册 PDF 的红头文档级切分
 ├── batch_redhead.py     # 批量：对 D:\Backup\RayChan 下所有 PDF 跑切分
+├── gui.py               # Windows 图形界面：选文件/目录切分 + 实时进度条
 ├── detect_redhead.py    # 视觉法：检测红头封面候选页 + 裁剪 OCR 标题
 ├── server.py            # 离线 HTTP 接口（FastAPI，对外提供切分能力）
 └── README.md
@@ -42,7 +43,8 @@ pip install pymupdf pytesseract Pillow numpy fastapi uvicorn python-multipart
 #       Copy-Item "C:\Program Files\Tesseract-OCR\*" vendor\tesseract\ -Recurse
 
 # 3) 运行
-python server.py                 # 离线 HTTP 接口 (http://127.0.0.1:8000)
+python gui.py                  # Windows 图形界面（选文件/目录 + 实时进度条）
+python server.py               # 离线 HTTP 接口 (http://127.0.0.1:8000)
 python segment_redhead.py <pdf>  # 或命令行直接切分
 ```
 
@@ -107,7 +109,24 @@ python batch_redhead.py [--force] [--src DIR] [--out DIR]
 
 ---
 
-## 功能三：视觉红头封面检测（`detect_redhead.py`）
+## 功能三：Windows 图形界面（`gui.py`）
+
+免第三方 GUI 依赖（tkinter，Python 官方 Windows 安装包自带）：
+
+- **添加 PDF 文件…** 多选；**添加目录…** 自动纳入目录下所有 PDF 批量处理；
+- 双进度条实时显示：**当前文件** OCR 页进度（done/total）+ **总体进度**（按文件数加权）；
+- 文件列表实时状态（等待 / 处理中 / 跳过 / 完成 / 失败 / 已取消），完成时显示切出文档数；
+- **停止** 按钮立即终止当前文件的 OCR 进程池，已完成的页缓存落盘、下次自动续跑；
+- 已生成 `manifest.csv` 的册子默认跳过，勾选**强制重切已存在**可全量重切；
+- **打开输出目录** 一键查看产物；segment 的逐页证据日志实时显示在日志区。
+
+```bash
+python gui.py
+```
+
+---
+
+## 功能四：视觉红头封面检测（`detect_redhead.py`）
 
 不依赖 OCR 全文，直接基于版面视觉检测「红头封面」：
 
@@ -121,7 +140,7 @@ python detect_redhead.py
 
 ---
 
-## 功能四：离线 HTTP 接口（`server.py`）
+## 功能五：离线 HTTP 接口（`server.py`）
 
 把切分能力以本地 HTTP 接口暴露给其它应用，**全程离线**（OCR 用本地 Tesseract，无外网调用）。监听 `127.0.0.1`，不对外开放。
 

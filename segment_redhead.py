@@ -35,6 +35,10 @@ TOP_RATIO = 0.5         # 只渲染页面顶部 50% 区域（红头公司名+标
 OCR_CACHE_SUFFIX = ".ocr.json"
 OSD_CACHE_SUFFIX = ".osd.json"
 
+
+class SegmentCancelled(Exception):
+    """切分被用户取消（GUI 停止按钮）。已完成页的 OCR 缓存已落盘，可续跑。"""
+
 DOC_KW = ["例会", "纪要", "通知", "通报", "报告", "申请", "决定", "决议",
           "方案", "计划", "制度", "规定", "办法", "细则", "意见", "函",
           "批复", "总结", "公告", "声明", "讲话", "责任书", "承诺书",
@@ -126,7 +130,9 @@ def _ocr_worker(pdf_pno):
     return pno, text, ang
 
 
-def load_ocr(pdf_path):
+def load_ocr(pdf_path, progress_cb=None):
+    """progress_cb(done, total)：每完成一页回调一次（GUI 进度条）；返回 False 表示用户取消，
+    此时终止 OCR 进程池、保存已完成页缓存并抛 SegmentCancelled。"""
     tcache = pdf_path + OCR_CACHE_SUFFIX
     ocache = pdf_path + OSD_CACHE_SUFFIX
     tdata, odata = {}, {}
@@ -141,23 +147,34 @@ def load_ocr(pdf_path):
     doc.close()
     todo = [(pdf_path, p) for p in range(1, n + 1)
             if not (str(p) in tdata and tdata[str(p)] and str(p) in odata and odata[str(p)] is not None)]
+    base_done = n - len(todo)     # 缓存已命中页计入进度
     if todo:
         workers = min(6, max(1, mp.cpu_count() or 1))
         with mp.Pool(processes=workers) as pool:
             done = 0
+            total = len(todo)
+            cancelled = False
             for pno, text, ang in pool.imap_unordered(_ocr_worker, todo):
                 tdata[str(pno)] = text
                 odata[str(pno)] = ang
                 done += 1
+                if progress_cb and progress_cb(base_done + done, n) is False:
+                    cancelled = True
+                    break
                 if done % 20 == 0:
                     with open(tcache, "w", encoding="utf-8") as f:
                         json.dump(tdata, f, ensure_ascii=False)
                     with open(ocache, "w", encoding="utf-8") as f:
                         json.dump(odata, f, ensure_ascii=False)
-        with open(tcache, "w", encoding="utf-8") as f:
-            json.dump(tdata, f, ensure_ascii=False)
-        with open(ocache, "w", encoding="utf-8") as f:
-            json.dump(odata, f, ensure_ascii=False)
+            with open(tcache, "w", encoding="utf-8") as f:
+                json.dump(tdata, f, ensure_ascii=False)
+            with open(ocache, "w", encoding="utf-8") as f:
+                json.dump(odata, f, ensure_ascii=False)
+            if cancelled:
+                pool.terminate()
+                raise SegmentCancelled(pdf_path)
+    elif progress_cb:
+        progress_cb(n, n)
     return tdata
 
 
@@ -427,8 +444,8 @@ def find_docs(ocr, verbose=False):
     return docs
 
 
-def segment(pdf_path, out_dir):
-    ocr = load_ocr(pdf_path)
+def segment(pdf_path, out_dir, progress_cb=None):
+    ocr = load_ocr(pdf_path, progress_cb)
     osd = load_osd(pdf_path)
     npages = len(ocr)
     docs = find_docs(ocr)
