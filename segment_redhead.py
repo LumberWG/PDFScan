@@ -2,7 +2,8 @@
 按边界切片并以其标题命名。文件名仅作为装订册名(输出文件夹)。
 用法: python segment_redhead.py <pdf> [--out DIR]
 """
-import sys, os, re, json, csv, argparse, io, shutil, fitz
+import sys, os, re, json, csv, argparse, shutil
+import pymupdf as fitz
 import multiprocessing as mp
 import pytesseract
 from PIL import Image
@@ -29,7 +30,6 @@ _vend_data = os.path.join(os.path.dirname(pytesseract.pytesseract.tesseract_cmd)
 if os.path.isdir(_vend_data):
     os.environ["TESSDATA_PREFIX"] = _vend_data
 TESS_LANG = "chi_sim"
-ZOOM = 2.0
 OCR_ZOOM = 1.6          # OCR 仅识别顶部条带并降分辨率（拆分只需每页前几行）
 TOP_RATIO = 0.5         # 只渲染页面顶部 50% 区域（红头公司名+标题+前几行均在此）
 OCR_CACHE_SUFFIX = ".ocr.json"
@@ -176,14 +176,6 @@ def load_ocr(pdf_path, progress_cb=None):
     elif progress_cb:
         progress_cb(n, n)
     return tdata
-
-
-def load_osd(pdf_path):
-    ocache = pdf_path + OSD_CACHE_SUFFIX
-    if os.path.exists(ocache):
-        with open(ocache, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
 
 
 ATT_RE = re.compile(r"^附\s*件\s*\d*\s*[：:、.．]?\s*(.*)$")
@@ -446,7 +438,6 @@ def find_docs(ocr, verbose=False):
 
 def segment(pdf_path, out_dir, progress_cb=None):
     ocr = load_ocr(pdf_path, progress_cb)
-    osd = load_osd(pdf_path)
     npages = len(ocr)
     docs = find_docs(ocr)
     print(f"[*] {os.path.basename(pdf_path)}  共{npages}页, 命中红头文档 {len(docs)} 篇")
@@ -489,27 +480,10 @@ def segment(pdf_path, out_dir, progress_cb=None):
             print(f"    - 跳过 纯空白段 p{s}-{end}（{title}）")
             continue
         newdoc = fitz.open()
-        # 逐页输出：竖版页矢量复制，旋转页栅格化转正(消除"横版")
+        # 逐页输出：全部矢量复制，保持源页原始方向（含 /Rotate 属性），
+        # 不按 OCR 判向转正——侧躺扫描页保持原状（用户要求输出与源页方向一致）。
         for pp in range(s, end + 1):
-            src_page = doc[pp - 1]
-            src_rot = src_page.rotation       # 源页自带旋转(0/90/180/270)
-            osd_ang = osd.get(str(pp), 0)     # OCR 判向补充角(0/180)
-            eff = (src_rot + osd_ang) % 360   # 最终视觉旋转
-            if eff == 0:
-                # 正立 -> 矢量复制(文字可选中、体积小)
-                newdoc.insert_pdf(doc, from_page=pp - 1, to_page=pp - 1)
-            else:
-                # 含旋转(含源 PDF 自带 /Rotate=90/270 横版) -> 栅格化转正,
-                # 消除"竖版变横版"：get_pixmap 默认已应用 src_rot, 再叠加 osd 判向角
-                print(f"    - 转正旋转页 p{pp} (源旋转={src_rot}, 判向={osd_ang})")
-                pix = doc[pp - 1].get_pixmap(matrix=fitz.Matrix(ZOOM, ZOOM))
-                im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                if osd_ang:
-                    im = im.rotate(osd_ang, expand=True)
-                buf = io.BytesIO()
-                im.save(buf, "PNG")
-                np = newdoc.new_page(width=im.width, height=im.height)
-                np.insert_image(np.rect, stream=buf.getvalue())
+            newdoc.insert_pdf(doc, from_page=pp - 1, to_page=pp - 1)
         safe = re.sub(r'[\\/:*?"<>|]', "_", norm(title))
         safe = safe.strip("，。,.;；：:！!?？、（）()_ ").strip()[:40]
         out_name = f"{safe}.pdf"
