@@ -10,7 +10,7 @@
 
 - Python 3.12（Windows arm64 实测）
 - Tesseract OCR v5.x，安装到 `C:\Program Files\Tesseract-OCR\tesseract.exe`，中文包 `chi_sim.traineddata` 置于其 `tessdata\`
-- Python 依赖：`pymupdf`(fitz)、`pytesseract`、`Pillow`、`numpy`（视觉法 `detect_redhead` 需要）
+- Python 依赖：`pymupdf`(fitz)、`pytesseract`、`Pillow`、`numpy`（视觉法 `detect_redhead` 需要）；运行 `server.py` 还需 `fastapi`、`uvicorn`、`python-multipart`
 - 注：本机 Windows arm64，opencv / RapidOCR / PaddleOCR 等无预编译轮子，故本地中文 OCR 采用 **Tesseract**（x86_64 模拟运行，单页约 3–5 秒）。
 
 ---
@@ -22,8 +22,33 @@ PDFScan/
 ├── segment_redhead.py   # 核心：单册 PDF 的红头文档级切分
 ├── batch_redhead.py     # 批量：对 D:\Backup\RayChan 下所有 PDF 跑切分
 ├── detect_redhead.py    # 视觉法：检测红头封面候选页 + 裁剪 OCR 标题
+├── server.py            # 离线 HTTP 接口（FastAPI，对外提供切分能力）
 └── README.md
 ```
+
+## 快速开始（从 GitHub 克隆后运行）
+
+```bash
+git clone https://github.com/LumberWG/PDFScan.git
+cd PDFScan
+
+# 1) Python 依赖
+pip install pymupdf pytesseract Pillow numpy fastapi uvicorn python-multipart
+
+# 2) Tesseract（二选一）
+#    A. 系统安装: Tesseract v5.x 装到 C:\Program Files\Tesseract-OCR，中文包 chi_sim 放其 tessdata\
+#    B. 便携捆绑(免安装): 把已装目录整目录复制到 vendor\tesseract\，脚本自动优先使用
+#       New-Item -ItemType Directory -Force -Path vendor\tesseract
+#       Copy-Item "C:\Program Files\Tesseract-OCR\*" vendor\tesseract\ -Recurse
+
+# 3) 运行
+python server.py                 # 离线 HTTP 接口 (http://127.0.0.1:8000)
+python segment_redhead.py <pdf>  # 或命令行直接切分
+```
+
+HTTP 接口端点：`/health`、`/split`、`/split/upload`、`/download`（详见 `server.py`）。
+
+---
 
 产物输出到 `D:\Backup\RayChan\split_redhead\<册名>\`，每册一个 `manifest.csv`。
 
