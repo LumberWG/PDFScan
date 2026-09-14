@@ -1,4 +1,4 @@
-import os, fitz, numpy as np
+import os, pymupdf as fitz, numpy as np
 
 
 def detect_redhead_covers(pdf_path, zoom=0.5):
