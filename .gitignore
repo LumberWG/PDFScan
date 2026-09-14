@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行日志
+*.log
+
+# OCR 缓存（可由 PDF 重新生成，体积大）
+*.ocr.json
+*.osd.json
+
+# 便携捆绑的 Tesseract 二进制（体积大、含第三方许可，不入库；分发时单独放入 vendor/）
+vendor/
+
+# 本机工作记忆（含项目上下文，不对外）
+.codebuddy/
+
+# 切分产物在 D:\Backup\RayChan，不在仓库内，无需忽略
