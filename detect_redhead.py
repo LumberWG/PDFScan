@@ -72,20 +72,11 @@ def detect_redhead_covers(pdf_path, zoom=0.5):
 
 
 def ocr_title_crop(pdf_path, page_no, bbox, zoom=2.0, lang="chi_sim"):
-    """裁剪封面标题区域并 OCR，返回标题文本。"""
-    import os, shutil, pytesseract
+    """裁剪封面标题区域并 OCR，返回标题文本。
+    OCR 走统一后端（segment_redhead.ocr_image_to_text）：默认 RapidOCR，缺失回退 Tesseract，
+    可用环境变量 PDFSCAN_OCR_BACKEND 切换。"""
     from PIL import Image
-    # 优先用项目内 vendor 便携版（免安装分发），否则回退系统 PATH
-    vend = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "vendor", "tesseract", "tesseract.exe")
-    if os.path.isfile(vend):
-        tess = vend
-    else:
-        tess = shutil.which("tesseract") or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    pytesseract.pytesseract.tesseract_cmd = tess
-    vdata = os.path.join(os.path.dirname(tess), "tessdata")
-    if os.path.isdir(vdata):
-        os.environ["TESSDATA_PREFIX"] = vdata
+    from segment_redhead import ocr_image_to_text
     doc = fitz.open(pdf_path)
     pix = doc[page_no - 1].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
@@ -94,7 +85,7 @@ def ocr_title_crop(pdf_path, page_no, bbox, zoom=2.0, lang="chi_sim"):
     sx0, sx1 = int(x0 * zoom / 0.5), int(x1 * zoom / 0.5)
     crop = img.crop((sx0, sy0, sx1, sy1))
     doc.close()
-    txt = pytesseract.image_to_string(crop, lang=lang)
+    txt = ocr_image_to_text(crop, lang=lang)
     return txt.strip()
 
 

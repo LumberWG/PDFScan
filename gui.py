@@ -4,7 +4,7 @@
 说明: 切分在后台线程执行，OCR 用多进程池；停止按钮在当前文件内终止 OCR（缓存已
 完成的页，下次自动续跑）。依赖 tkinter（Python 官方 Windows 安装包自带）。
 """
-import os, re, glob, sys, queue, shutil, threading, contextlib
+import os, re, glob, sys, csv, queue, shutil, threading, contextlib
 import multiprocessing as mp
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -39,23 +39,39 @@ def pdf_pages(path):
 
 def book_status(pdf_path, out_dir):
     """检查一册的处理状态（不跑切分）。
-    返回 (状态, 备注)：未处理 / 已切(正常) / 已切·含横版N个（旧逻辑转正过的页，建议强制重切）。"""
+    返回 (状态, 备注)：未处理 / 已切(正常) / 已切·版面被改N个（建议强制重切）。
+    判据：按 manifest 比对输出页与源页的方向(rotation/横竖)，不一致即说明该产物被旋转过
+    （旧版按 OCR 判向栅格化转正的遗留）。注意不能只看“输出是否横版”——源 PDF 本身是
+    横版页时属正常，不应重切。"""
     base = PDF_RE.sub("", os.path.basename(pdf_path))
     root = os.path.join(out_dir, base)
-    if not os.path.exists(os.path.join(root, "manifest.csv")):
+    man = os.path.join(root, "manifest.csv")
+    if not os.path.exists(man):
         return "未处理", ""
     bad = 0
     try:
-        for f in os.listdir(root):
-            if f.lower().endswith(".pdf"):
-                d = fitz.open(os.path.join(root, f))
-                if any(d[i].rect.width > d[i].rect.height for i in range(d.page_count)):
+        with open(man, "r", encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        src = fitz.open(pdf_path)
+        for r in rows:
+            m = re.match(r"\s*(\d+)\s*-\s*(\d+)\s*$", r.get("pages") or "")
+            out = r.get("out") or ""
+            if not m or not out or not os.path.exists(out):
+                continue
+            s, e = int(m.group(1)), int(m.group(2))
+            d = fitz.open(out)
+            for i in range(min(d.page_count, e - s + 1)):
+                sp, op = src[s - 1 + i], d[i]
+                if (op.rotation != sp.rotation
+                        or (op.rect.width > op.rect.height) != (sp.rect.width > sp.rect.height)):
                     bad += 1
-                d.close()
+                    break
+            d.close()
+        src.close()
     except Exception as e:
         return "已切(检查出错)", str(e)[:40]
     if bad:
-        return f"已切·含横版{bad}个", "建议强制重切"
+        return f"已切·版面被改{bad}个", "建议强制重切"
     return "已切(正常)", ""
 
 
@@ -113,7 +129,7 @@ class App(tk.Tk):
         self.force_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mid, text="强制重切已存在", variable=self.force_var).pack(side="left", padx=(10, 0))
         self.autofix_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(mid, text="自动重切横版旧产物", variable=self.autofix_var,
+        ttk.Checkbutton(mid, text="自动重切被改版面旧产物", variable=self.autofix_var,
                         onvalue=True, offvalue=False).pack(side="left", padx=(10, 0))
 
         act = ttk.Frame(self, padding=8)
@@ -258,11 +274,11 @@ class App(tk.Tk):
             self.q.put(("status", i, status, hint))
             if status == "未处理":
                 todo += 1
-            elif status.startswith("已切·含横版"):
+            elif status.startswith("已切·版面被改"):
                 bad += 1
             else:
                 ok += 1
-        self.q.put(("log", f"[检查] 共 {len(files)} 册：未处理 {todo}，正常 {ok}，含横版页建议重切 {bad}（勾选“强制重切已存在”重切后者）"))
+        self.q.put(("log", f"[检查] 共 {len(files)} 册：未处理 {todo}，正常 {ok}，版面被改建议重切 {bad}（勾选“强制重切已存在”重切后者）"))
         self.q.put(("check_done",))
 
     # ---------- 处理 ----------
@@ -316,7 +332,7 @@ class App(tk.Tk):
                         redo = True
                     elif autofix:
                         st, _ = book_status(path, out_dir)
-                        redo = st.startswith("已切·含横版")
+                        redo = st.startswith("已切·版面被改")
                 if os.path.exists(man) and not redo:
                     self.q.put(("status", i, "跳过(已存在)", ""))
                     self.q.put(("log", f"[SKIP] {base}（已存在，勾选“强制重切”可重切）"))
@@ -329,7 +345,7 @@ class App(tk.Tk):
                         import time
                         bak += time.strftime("-%H%M%S")
                     os.rename(root, bak)
-                    self.q.put(("log", f"[REDO] {base}（{'强制重切' if force else '旧逻辑横版页，自动重切'}）"))
+                    self.q.put(("log", f"[REDO] {base}（{'强制重切' if force else '旧产物版面被改，自动重切'}）"))
                 else:
                     bak = None
                 self.q.put(("status", i, "处理中…", ""))
