@@ -660,8 +660,8 @@ def check_layout_preserved(src_doc, out_path, pages):
                 bad += 1
                 break
             sp, op = src_doc[pno - 1], d[i]
-            if (op.rotation != sp.rotation
-                    or abs(op.rect.width - sp.rect.width) > 1
+            # 只比显示尺寸：方向错会导致宽高互换（>1 即捕到）；产物 /Rotate=0 故不比 rotation 元数据
+            if (abs(op.rect.width - sp.rect.width) > 1
                     or abs(op.rect.height - sp.rect.height) > 1):
                 bad += 1
         d.close()
@@ -718,10 +718,15 @@ def segment(pdf_path, out_dir, progress_cb=None):
             print(f"    - 跳过 纯空白段 p{s}-{end}（{title}）")
             continue
         newdoc = fitz.open()
-        # 逐页输出：一律矢量复制(insert_pdf)，保持源页原始方向与尺寸(含 /Rotate)。
-        # 只做切分、不改版面：不按 OCR 判向转正、不栅格化、不 set_rotation。
+        # 逐页输出：只做切分、绝不旋转/转正。
+        # 用 show_pdf_page 把源页按【显示尺寸】矢量绘制到新页——内容保持源页原始朝向，
+        # 且产物统一 /Rotate=0，彻底规避 /Rotate 元数据在不同阅读器下的解释差异。
+        # （仍是矢量复制，不栅格化；与铁律一致：只切分、不改版面。）
         for pp in range(s, end + 1):
-            newdoc.insert_pdf(doc, from_page=pp - 1, to_page=pp - 1)
+            sp = doc[pp - 1]
+            r = sp.rect  # 已展开 /Rotate 后的显示尺寸
+            newdoc.new_page(width=r.width, height=r.height)
+            newdoc[-1].show_pdf_page(r, doc, pp - 1)
         safe = re.sub(r'[\\/:*?"<>|]', "_", norm(title))
         safe = safe.strip("，。,.;；：:！!?？、（）()_ ").strip()[:40]
         out_name = f"{safe}.pdf"
